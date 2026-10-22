@@ -22,13 +22,25 @@ TLSFix works by keeping the real `SSLContextRef` valid (so any call it doesn't i
 
 Verification is the OS's job, as the chain received is rebuilt into a `SecTrustRef` and evaluated with `SecTrustEvaluate` against the live system/user trust store. **This eliminates the need to bundle external certificates, and any new added profiles/certificates via the settings app are reflected inmediately, without needing to restart anything**.
 
+## ECC certificates on iOS 3 and 4
+
+iOS 3 and 4 cannot verify elliptic-curve (ECC) keys or ECDSA signatures. Installing an ECC root through a profile only stores it as a plain certificate, and every site whose chain uses ECC stays untrusted :(.
+
+On those versions TLSFix verifies those chains itself, against the CA certificates of the installed profiles:
+
+- Only when the system has already rejected the chain, and only when the chain contains an ECC key or signature. An all-RSA chain is always the system's decision.
+- The same checks as the system's SSL policy, every signature and date up to an installed root, a server certificate, etc.
+- An app that sets its own anchors or policies on a trust (SSL pinning) still the system's decition.
+
+iOS 5 and later, which verifes ECC themselves, none of this occurs.
+
 ## Install
 
 1. **Install the package**:
-    - Install the DEB file from [releases](https://github.com/ObscureMosquito/TLSFix/releases) in your preferred manner
+   - Install the DEB file from [releases](https://github.com/ObscureMosquito/TLSFix/releases) in your preferred manner
 
-2. **Install modern roots**: 
-    - Go to [tlsroot.litten.ca](https://tlsroot.litten.ca/) in the device you're installing, and install the certificate bundle, TLSFix still needs a modern trust store to verify against.
+2. **Install modern roots**:
+   - Go to [tlsroot.litten.ca](https://tlsroot.litten.ca/) in the device you're installing, and install the certificate bundle, TLSFix still needs a modern trust store to verify against.
 
 Restart all userspace processes, or reboot.
 
@@ -51,8 +63,8 @@ Source layout:
 
 ### Note on Pinning and mutual TLS
 
-- As stated before, when an app drives its own trust 
-(SSL Pinning), TLSFix defers the decision completely, the app sees the real peer certificate via `SSLCopyPeerTrust` and decides whether to accept it. But the **connection itself is still handled by TLSFix**, it runs the modern handshake and crypto the legacy stack couldn't. So an app that both validates and pins still gets a connection that was impossible before, TLSFix only hands back the trust verdict, never the cipher.
+- As stated before, when an app drives its own trust
+  (SSL Pinning), TLSFix defers the decision completely, the app sees the real peer certificate via `SSLCopyPeerTrust` and runs its logic. But the **connection itself is still handled by TLSFix**, it runs the modern handshake and crypto the legacy stack cant. So an app that both validates and pins still gets a connection that was impossible before, TLSFix only hands back the trust result but not the cypher.
 
 - **Mutual TLS works** the same way (APNs, iMessage, and other client-certificate services). The client identity is signed through iOS `SecKeyRawSign` so the private key is never extracted, but the handshake carrying that identity is again TLSFix's modern one, so these services reach servers that now require a cipher the old stack can't speak.
 

@@ -26,6 +26,7 @@ static void sh_free_mem(Shadow *s) {
     if (s->clientX509) X509_free(s->clientX509);
     if (s->clientChain) sk_X509_pop_free(s->clientChain, X509_free);
     if (s->clientKey) CFRelease(s->clientKey);
+    if (s->eccTrust) CFRelease(s->eccTrust);
     free(s);
 }
 void sh_release(Shadow *s) {
@@ -66,6 +67,35 @@ Shadow *sh_create(SSLContextRef c) {
     pthread_mutex_unlock(&gLock);
     if (freeEvicted) sh_free_mem(evicted);
     return s;
+}
+int sh_trust_verified(SecTrustRef t) {
+    int found = 0;
+
+    pthread_mutex_lock(&gLock);
+
+    for (int i = 0; i < MAXSH && !found; i++) {
+        if (gTab[i] && gTab[i]->eccTrust == t) found = 1;
+    }
+
+    pthread_mutex_unlock(&gLock);
+    return found;
+}
+void sh_forget_trust(SecTrustRef t) {
+    SecTrustRef dropped = NULL;
+
+    pthread_mutex_lock(&gLock);
+
+    for (int i = 0; i < MAXSH; i++) {
+        if (gTab[i] && gTab[i]->eccTrust == t) {
+            dropped = gTab[i]->eccTrust;
+            gTab[i]->eccTrust = NULL;
+            break;
+        }
+    }
+
+    pthread_mutex_unlock(&gLock);
+
+    if (dropped) CFRelease(dropped);
 }
 void sh_free(SSLContextRef c) {
     if (ensure_ready() != 1) return;
@@ -207,9 +237,14 @@ static int verify_chain(X509_STORE_CTX *sctx, void *arg) {
     SecTrustRef t = NULL; int ok = 0;
     if (SecTrustCreateWithCertificates(arr, pol, &t) == errSecSuccess && t) {
         SecTrustResultType rr = kSecTrustResultInvalid;
-        if (SecTrustEvaluate(t, &rr) == errSecSuccess && (rr == kSecTrustResultProceed || rr == kSecTrustResultUnspecified)) ok = 1;
+        if (o_TrustEvaluate(t, &rr) == errSecSuccess && (rr == kSecTrustResultProceed || rr == kSecTrustResultUnspecified)) ok = 1;
         CFRelease(t);
     }
+
+    if (!ok && tlsfix_ecc_fallback && ecc_in_chain(chain)) {
+        ok = ecc_verify(chain, s ? s->host : NULL);
+    }
+
     if (pol) CFRelease(pol);
     if (host) CFRelease(host);
     CFRelease(arr);
@@ -245,7 +280,25 @@ int sh_build_trust(Shadow *s, SecTrustRef *trust) {
     CFRelease(arr);
     if (r != errSecSuccess) return 0;
     SecTrustResultType rr = kSecTrustResultInvalid;
-    SecTrustEvaluate(t, &rr);   // populate internal chain, a native handshake returns an evaluated trust, and CFNetwork's SocketStream path derefs it (SecTrustCopyExceptions)
+    o_TrustEvaluate(t, &rr);
+
+    int trusted = rr == kSecTrustResultProceed || rr == kSecTrustResultUnspecified;
+
+    if (!trusted && tlsfix_ecc_fallback) {
+        STACK_OF(X509) *chain = SSL_get_peer_cert_chain(s->ssl);
+
+        if (ecc_in_chain(chain) && ecc_verify(chain, s->host)) {
+            CFRetain(t);
+
+            pthread_mutex_lock(&gLock);
+            SecTrustRef old = s->eccTrust;
+            s->eccTrust = t;
+            pthread_mutex_unlock(&gLock);
+
+            if (old) CFRelease(old);
+        }
+    }
+
     *trust = t;
     return 1;
 }

@@ -10,6 +10,7 @@
 #ifndef errSSLWouldBlock
 #define errSSLWouldBlock  -9803
 #endif
+
 #define ST_ClosedGraceful -9805
 #define ST_ClosedAbort    -9806
 #define ST_PeerAuth       -9841
@@ -33,16 +34,24 @@ typedef struct {
     unsigned         lastUse;
     int              refcount;
     SSL             *ssl;
+    SecTrustRef      eccTrust;
 } Shadow;
 
-int        ensure_ready(void);
-Shadow    *sh_get(SSLContextRef c);
-Shadow    *sh_create(SSLContextRef c);
-void       sh_release(Shadow *s);
-void       sh_free(SSLContextRef c);
-int        ossl_init(Shadow *s);
-void       capture_identity(Shadow *s, CFArrayRef certRefs);
-int        sh_build_trust(Shadow *s, SecTrustRef *trust);
+int ensure_ready(void);
+Shadow *sh_get(SSLContextRef c);
+Shadow *sh_create(SSLContextRef c);
+void sh_release(Shadow *s);
+void sh_free(SSLContextRef c);
+int ossl_init(Shadow *s);
+void capture_identity(Shadow *s, CFArrayRef certRefs);
+int sh_build_trust(Shadow *s, SecTrustRef *trust);
 CFArrayRef sh_cert_array(Shadow *s);
+int sh_trust_verified(SecTrustRef t);
+void sh_forget_trust(SecTrustRef t);
+
+extern int tlsfix_ecc_fallback;
+extern OSStatus (*o_TrustEvaluate)(SecTrustRef, SecTrustResultType *);
+int ecc_in_chain(STACK_OF(X509) *chain);
+int ecc_verify(STACK_OF(X509) *chain, const char *host);
 
 #endif

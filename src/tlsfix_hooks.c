@@ -1,6 +1,8 @@
 #include "tlsfix.h"
 #include <dlfcn.h>
 #include <string.h>
+#include <stdint.h>
+#include <stdio.h>
 
 
 extern void MSHookFunction(void *symbol, void *replace, void **result);
@@ -99,7 +101,7 @@ static OSStatus my_Write(SSLContextRef c, const void *data, size_t len, size_t *
     sh_release(s);
     return rv;
 }
-// SSLDisposeContext is intentionally not hooked, function too small, MSHookFunction overwrites adjacent memory.
+
 static OSStatus (*o_Close)(SSLContextRef);
 static OSStatus my_Close(SSLContextRef c) {
     Shadow *s = sh_get(c);
@@ -186,6 +188,38 @@ static OSStatus my_SetCertificate(SSLContextRef c, CFArrayRef certRefs) {
     return o_SetCertificate(c, certRefs);
 }
 
+static OSStatus my_TrustEvaluate(SecTrustRef t, SecTrustResultType *result) {
+    OSStatus rv = o_TrustEvaluate(t, result);
+
+    if (rv != errSecSuccess || !result) return rv;
+
+    int trusted = *result == kSecTrustResultProceed || *result == kSecTrustResultUnspecified;
+
+    if (!trusted && sh_trust_verified(t)) {
+        *result = kSecTrustResultUnspecified;
+    }
+
+    return rv;
+}
+
+static OSStatus (*o_SetAnchors)(SecTrustRef, CFArrayRef);
+static OSStatus my_SetAnchors(SecTrustRef t, CFArrayRef anchors) {
+    sh_forget_trust(t);
+    return o_SetAnchors(t, anchors);
+}
+
+static OSStatus (*o_SetAnchorsOnly)(SecTrustRef, Boolean);
+static OSStatus my_SetAnchorsOnly(SecTrustRef t, Boolean only) {
+    sh_forget_trust(t);
+    return o_SetAnchorsOnly(t, only);
+}
+
+static OSStatus (*o_SetPolicies)(SecTrustRef, CFTypeRef);
+static OSStatus my_SetPolicies(SecTrustRef t, CFTypeRef policies) {
+    sh_forget_trust(t);
+    return o_SetPolicies(t, policies);
+}
+
 static void hook(const char *name, void *repl, void **orig) {
     void *sym = dlsym(RTLD_DEFAULT, name);
     if (sym) MSHookFunction(sym, repl, orig);
@@ -207,11 +241,24 @@ static void tlsfix_init(void) {
     hook("SSLRead",                        (void *)my_Read,              (void **)&o_Read);
     hook("SSLWrite",                       (void *)my_Write,             (void **)&o_Write);
     hook("SSLClose",                       (void *)my_Close,             (void **)&o_Close);
+    // SSLDisposeContext is intentionally not hooked (too small, overwrites SSLNewContext on iOS 6).
     hook("SSLGetSessionState",             (void *)my_GetSessionState,   (void **)&o_GetSessionState);
     hook("SSLGetNegotiatedProtocolVersion",(void *)my_GetNegProto,       (void **)&o_GetNegProto);
     hook("SSLGetNegotiatedCipher",         (void *)my_GetNegCipher,      (void **)&o_GetNegCipher);
     hook("SSLGetBufferedReadSize",         (void *)my_GetBuffered,       (void **)&o_GetBuffered);
     hook("SSLCopyPeerTrust",               (void *)my_CopyPeerTrust,     (void **)&o_CopyPeerTrust);
-    hook("SSLCopyPeerCertificates",        (void *)my_CopyPeerCerts,     (void **)&o_CopyPeerCerts);
+
+    if (!dlsym(RTLD_DEFAULT, "_SSLCopyPeerCertificates")) {
+        hook("SSLCopyPeerCertificates",    (void *)my_CopyPeerCerts,     (void **)&o_CopyPeerCerts);
+    }
     hook("SSLSetCertificate",              (void *)my_SetCertificate,    (void **)&o_SetCertificate);
+    // ECC fallback only where the system can't verify ECDSA (before iOS 5, CoreFoundation 675)
+    if (kCFCoreFoundationVersionNumber < 675.0) {
+        tlsfix_ecc_fallback = 1;
+
+        hook("SecTrustSetAnchorCertificates",     (void *)my_SetAnchors,     (void **)&o_SetAnchors);
+        hook("SecTrustSetAnchorCertificatesOnly", (void *)my_SetAnchorsOnly, (void **)&o_SetAnchorsOnly);
+        hook("SecTrustSetPolicies",               (void *)my_SetPolicies,    (void **)&o_SetPolicies);
+        hook("SecTrustEvaluate",                  (void *)my_TrustEvaluate,  (void **)&o_TrustEvaluate);
+    }
 }
